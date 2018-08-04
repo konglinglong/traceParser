@@ -1,9 +1,13 @@
 package main
 
-//import "bufio"
-//import "bytes"
-//import "encoding/binary"
+import "bufio"
+import "io/ioutil"
+
+//import "strings"
+import "encoding/binary"
 import "encoding/json"
+
+//import "strconv"
 import "fmt"
 import "os"
 
@@ -17,13 +21,13 @@ type TraceItem struct {
 }
 
 type StructMemberDescribe struct {
-	Field_name string      `json:"field_name"`
-	Offset     json.Number `json:"offset"`
-	Size       json.Number `json:"size"`
-	Print_fmt  json.Number `json:"print_fmt"`
-	Show_flag  json.Number `json:"show_flag"`
-	Sub_struct string      `json:"sub_struct"`
-	Array_len  json.Number `json:"array_len"`
+	Field_name string       `json:"field_name"`
+	Offset     json.Number  `json:"offset"`
+	Size       json.Number  `json:"size"`
+	Print_fmt  json.Number  `json:"print_fmt"`
+	Show_flag  json.Number  `json:"show_flag"`
+	Sub_struct *string      `json:"sub_struct"`
+	Array_len  *json.Number `json:"array_len"`
 }
 
 type StructDescribe struct {
@@ -31,7 +35,7 @@ type StructDescribe struct {
 	Member_list []StructMemberDescribe `json:"member_list"`
 }
 
-type TraceDataDescribe struct {
+type TraceDescribeTable struct {
 	Version                           string                    `json:"version"`
 	Build_time                        string                    `json:"build_time"`
 	Struct_id_and_struct_name_table   map[string]string         `json:"struct_id_and_struct_name_table"`
@@ -39,101 +43,104 @@ type TraceDataDescribe struct {
 	Struct_describe_table             map[string]StructDescribe `json:"struct_describe_table"`
 }
 
-const traceHeadSize = 16
+const traceHdrSize = 16
+
+var descTable TraceDescribeTable
+
+func parseStructDesc(structName *string, fatherStructName *string, desc *string) {
+	structDesc, err := descTable.Struct_describe_table[*structName]
+	if !err {
+		fmt.Println("can not find struct : ", *structName)
+		return
+	}
+	//	fmt.Println(structDesc)
+	fStructName := ""
+	if fatherStructName != nil {
+		fStructName = *fatherStructName + "."
+	}
+	for i := 0; i < len(structDesc.Member_list); i++ {
+		//		fmt.Println(structDesc.Member_list[i])
+		if structDesc.Member_list[i].Show_flag != "1" {
+			//			fmt.Println("continue")
+			continue
+		}
+
+		isSubscriptExist := false //是否存在下标
+		arrayLen := 1             //数组长度
+		if structDesc.Member_list[i].Array_len != nil {
+			alen, err := structDesc.Member_list[i].Array_len.Int64()
+			if err != nil {
+				fmt.Println("Int64() : ", err)
+				return
+			}
+			isSubscriptExist = true
+			arrayLen = int(alen)
+		}
+
+		subscript := "" //下标
+		for ii := 0; ii < arrayLen; ii++ {
+			if isSubscriptExist {
+				subscript = fmt.Sprintf("[%d]", ii)
+			}
+			fieldName := structDesc.Member_list[i].Field_name + subscript
+			if structDesc.Member_list[i].Sub_struct != nil {
+				parseStructDesc(structDesc.Member_list[i].Sub_struct, &fieldName, desc)
+			} else {
+				*desc = *desc + fStructName + fieldName + ","
+			}
+		}
+	}
+}
 
 func main() {
-	//	file, err := os.Open("trc_(17-04-13 18.02.25)(0).trc")
-	file, err := os.Open("trc_data_describe_table.txt")
+	dataFile, err := os.Open("trc_data.dat")
 	if err != nil {
-		fmt.Println("open error!", err)
+		fmt.Println("open trc_data.dat error!", err)
 		return
 	}
-	defer file.Close()
+	defer dataFile.Close()
 
-	//	count := 0
-
-	//	for {
-	//		//		buffer := make([]byte, 2048, 4096)
-	//		var traceItem TraceItem
-	//		for {
-	//			var word [4]byte
-	//			var halfword [2]byte
-	//
-	//			n, err := file.Read(word[:])
-	//			if err != nil || n < len(word[:]) {
-	//				fmt.Println("file.Read failed:", err)
-	//				return
-	//			}
-	//
-	//			traceItem.magicNum = binary.BigEndian.Uint32(word[:])
-	//
-	//			if traceItem.magicNum != 0xddccbbaa {
-	//				file.Seek(-3, os.SEEK_CUR)
-	//				continue
-	//			} else {
-	//				n, err := file.Read(word[:])
-	//				if err != nil || n < len(word[:]) {
-	//					fmt.Println("file.Read failed:", err)
-	//					return
-	//				}
-	//				traceItem.sec = binary.BigEndian.Uint32(word[:])
-	//
-	//				n, err = file.Read(word[:])
-	//				if err != nil || n < len(word[:]) {
-	//					fmt.Println("file.Read failed:", err)
-	//					return
-	//				}
-	//				traceItem.usec = binary.BigEndian.Uint32(word[:])
-	//
-	//				n, err = file.Read(halfword[:])
-	//				if err != nil || n < len(halfword[:]) {
-	//					fmt.Println("file.Read failed:", err)
-	//					return
-	//				}
-	//				traceItem.traceType = binary.BigEndian.Uint16(halfword[:])
-	//
-	//				n, err = file.Read(halfword[:])
-	//				if err != nil || n < len(halfword[:]) {
-	//					fmt.Println("file.Read failed:", err)
-	//					return
-	//				}
-	//				traceItem.traceSize = binary.BigEndian.Uint16(halfword[:])
-	//
-	//				if traceItem.traceSize > 1500 {
-	//					fmt.Printf("msg size[%d] err!\n", traceItem.traceSize)
-	//					continue
-	//				}
-	//
-	//				n, err = file.Read(traceItem.data[0:traceItem.traceSize])
-	//				if err != nil || n < len(halfword) {
-	//					fmt.Println("file.Read failed:", err)
-	//					return
-	//				}
-	//
-	//				break
-	//			}
-	//		}
-	//
-	//		fmt.Printf("magic_num = %x\n", traceItem.magicNum)
-	//		json.Unmarshal(data, v)
-	//	}
-
-	var data [1024 * 1024]byte
-	n, err := file.Read(data[:])
+	descData, err := ioutil.ReadFile("trc_data_describe_table.txt")
 	if err != nil {
-		fmt.Println("file.Read failed:", n, err)
+		fmt.Println("open trc_data_describe_table.txt error!", err)
 		return
 	}
 
-	//	var traceItem TraceItem
-	//	fmt.Println(traceItem)
+	err = json.Unmarshal(descData, &descTable)
+	if err != nil {
+		fmt.Println("Unmarshal error!", err)
+		return
+	}
+	//	fmt.Println(descTable)
 
-	//	b := []byte(`{"Name":"Wednesday","Age":6,"Parents":["Gomez","Morticia"]}`)
-	//	var f interface{}
-	var m TraceDataDescribe
-	json.Unmarshal(data[:n], &m)
-	//	fmt.Printf("%+v", m)
-	//	fmt.Println(m)
-	fmt.Println(m.Struct_id_and_struct_name_table["1287"])
-	fmt.Println(m)
+	structName := "S_RarMsg3SchedResult"
+	desc := ""
+	parseStructDesc(&structName, nil, &desc)
+	fmt.Println(desc)
+
+	return
+
+	dataReader := bufio.NewReader(dataFile)
+	for {
+		item, err := dataReader.ReadBytes(0xaa)
+		if err != nil {
+			fmt.Println(err)
+			break
+		}
+
+		itemLen := len(item)
+		if itemLen > traceHdrSize && item[itemLen-4] == 0xdd && item[itemLen-3] == 0xcc && item[itemLen-2] == 0xbb {
+			//			fmt.Println(item)
+
+			trcSize := binary.BigEndian.Uint16(item[10:12])
+			if int(trcSize) == itemLen {
+				//				fmt.Println(item)
+				sec := binary.BigEndian.Uint32(item[:4])
+				usec := binary.BigEndian.Uint32(item[4:8])
+				trcType := binary.BigEndian.Uint16(item[8:10])
+				trcSize := binary.BigEndian.Uint16(item[10:12])
+				fmt.Println(sec, usec, trcType, trcSize)
+			}
+		}
+	}
 }
