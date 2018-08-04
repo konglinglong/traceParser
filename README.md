@@ -1,2 +1,2 @@
 # traceParser
-GO语言实现的trace解析工具
+GO璇█瀹炵幇鐨則race瑙ｆ瀽宸ュ叿
