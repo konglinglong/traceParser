@@ -9,6 +9,7 @@ import "encoding/binary"
 import "encoding/json"
 import "path/filepath"
 import "flag"
+import "bytes"
 import "fmt"
 import "os"
 
@@ -46,7 +47,7 @@ type TraceDescribeTable struct {
 
 type WriteFileInfo struct {
 	file *os.File
-	data *string
+	data string
 }
 
 const TRACE_HDR_SIZE = 16
@@ -110,7 +111,7 @@ func createXlsFile(structId string) string {
 }
 
 //解析跟踪结构体描述
-func parseStructDesc(structName *string, fatherStructName *string, desc *string) {
+func parseStructDesc(structName *string, fatherStructName *string, buffer *bytes.Buffer) {
 	structDesc, err := gDescTable.StructDescribeTable[*structName]
 	if !err {
 		fmt.Println("can not find struct : ", *structName)
@@ -147,16 +148,18 @@ func parseStructDesc(structName *string, fatherStructName *string, desc *string)
 			}
 			fieldName := structDesc.MemberList[i].FieldName + subscript
 			if structDesc.MemberList[i].SubStruct != nil {
-				parseStructDesc(structDesc.MemberList[i].SubStruct, &fieldName, desc)
+				parseStructDesc(structDesc.MemberList[i].SubStruct, &fieldName, buffer)
 			} else {
-				*desc = *desc + fStructName + fieldName + ","
+				buffer.WriteString(fStructName)
+				buffer.WriteString(fieldName)
+				buffer.WriteString(",")
 			}
 		}
 	}
 }
 
 //解析跟踪数据
-func parseStructData(structName *string, structData []byte, desc *string) {
+func parseStructData(structName *string, structData []byte, buffer *bytes.Buffer) {
 	structDesc, err := gDescTable.StructDescribeTable[*structName]
 	if !err {
 		fmt.Println("can not find struct : ", *structName)
@@ -193,7 +196,7 @@ func parseStructData(structName *string, structData []byte, desc *string) {
 			}
 			valueBytes := structData[int(mOffset)+int(mSize)*ii:]
 			if structDesc.MemberList[i].SubStruct != nil {
-				parseStructData(structDesc.MemberList[i].SubStruct, valueBytes, desc)
+				parseStructData(structDesc.MemberList[i].SubStruct, valueBytes, buffer)
 			} else {
 				var value uint64 = 0
 				switch structDesc.MemberList[i].Size {
@@ -220,7 +223,8 @@ func parseStructData(structName *string, structData []byte, desc *string) {
 				default:
 					fmt.Println("structDesc.MemberList[i].PrintFmt error!")
 				}
-				*desc = *desc + valueStr + ","
+				buffer.WriteString(valueStr)
+				buffer.WriteString(",")
 			}
 		}
 	}
@@ -252,7 +256,7 @@ func writeFileWorker(dataChan <-chan WriteFileInfo) {
 		if !ok {
 			break
 		}
-		wdata.file.WriteString(*wdata.data)
+		wdata.file.WriteString(wdata.data)
 	}
 }
 
@@ -280,15 +284,14 @@ func parseDataWorker(jobNum int, jobId int, dataChan <-chan []byte, syncChans []
 			continue
 		}
 
-		outStr := new(string)
-		*outStr = fmt.Sprintf("%s, %d, ", time.Unix(int64(sec), int64(usec)).Format("060102 15:04:05"), usec/1000)
+		buffer := bytes.NewBufferString(fmt.Sprintf("%s, %d, ", time.Unix(int64(sec), int64(usec)).Format("060102 15:04:05"), usec/1000))
 		//减4是少了MAGIC
-		parseStructData(&structName, item[TRACE_HDR_SIZE-4:], outStr)
-		*outStr += "\n"
+		parseStructData(&structName, item[TRACE_HDR_SIZE-4:], buffer)
+		buffer.WriteString("\n")
 
 		var writeInfo WriteFileInfo
 		writeInfo.file = gXlsFile[structId]
-		writeInfo.data = outStr
+		writeInfo.data = buffer.String()
 
 		if jobNum > 1 {
 			<-syncChans[jobId%jobNum]
@@ -406,10 +409,10 @@ func main() {
 					file, err = gXlsFile[structId]
 
 					//写入表头
-					desc := "time,ms,"
-					parseStructDesc(&structName, nil, &desc)
-					desc += "\n"
-					file.WriteString(desc)
+					buffer := bytes.NewBufferString("time,ms,")
+					parseStructDesc(&structName, nil, buffer)
+					buffer.WriteString("\n")
+					file.WriteString(buffer.String())
 				}
 
 				dataChans[loop%cpuNum] <- item
