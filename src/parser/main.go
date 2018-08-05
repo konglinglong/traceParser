@@ -8,6 +8,7 @@ import "strings"
 import "encoding/binary"
 import "encoding/json"
 import "path/filepath"
+import "flag"
 import "fmt"
 import "os"
 
@@ -54,6 +55,7 @@ var gXlsFile map[string]*os.File
 //创建文件夹
 func createDir(fileName string) string {
 
+	//使用解析工具路径
 	dir, err := filepath.Abs(filepath.Dir(os.Args[0]))
 	if err != nil {
 		fmt.Println("filepath.Abs error!", err)
@@ -263,7 +265,8 @@ func worker(jobNum int, jobId int, dataChan <-chan []byte, syncChans []chan int)
 		}
 
 		desc := fmt.Sprintf("%s, %d, ", time.Unix(int64(sec), int64(usec)).Format("060102 15:04:05"), usec/1000)
-		parseStructData(&structName, item[12:], &desc)
+		//减4是少了MAGIC
+		parseStructData(&structName, item[TRACE_HDR_SIZE-4:], &desc)
 		desc += "\n"
 
 		file, _ := gXlsFile[structId]
@@ -282,6 +285,22 @@ func main() {
 
 	start := time.Now()
 
+	help := flag.Bool("h", false, "show this help")
+	trcDataFile := flag.String("data", "", "set trace data file")
+	trcDescFile := flag.String("desc", "", "set trace describe file")
+
+	flag.Parse()
+
+	if *help {
+		flag.Usage()
+		return
+	}
+
+	if *trcDataFile == "" || *trcDescFile == "" {
+		flag.Usage()
+		return
+	}
+
 	cpuNum := runtime.NumCPU()
 	if cpuNum > CPU_PROCESS_NUM_MAX {
 		cpuNum = CPU_PROCESS_NUM_MAX
@@ -291,7 +310,7 @@ func main() {
 		runtime.GOMAXPROCS(cpuNum)
 	}
 
-	gFileDir = createDir("trc_data.dat")
+	gFileDir = createDir(*trcDataFile)
 	if gFileDir == "" {
 		fmt.Println("createDir error!", gFileDir)
 		return
@@ -299,14 +318,14 @@ func main() {
 
 	gXlsFile = make(map[string]*os.File, 512)
 
-	dataFile, err := os.Open("trc_data.dat")
+	dataFile, err := os.Open(*trcDataFile)
 	if err != nil {
-		fmt.Println("open trc_data.dat error!", err)
+		fmt.Println(err)
 		return
 	}
 	defer dataFile.Close()
 
-	descData, err := ioutil.ReadFile("trc_data_describe_table.txt")
+	descData, err := ioutil.ReadFile(*trcDescFile)
 	if err != nil {
 		fmt.Println("open trc_data_describe_table.txt error!", err)
 		return
@@ -365,7 +384,7 @@ func main() {
 					file, err = gXlsFile[structId]
 
 					//写入表头
-					desc := "time,msec,"
+					desc := "time,ms,"
 					parseStructDesc(&structName, nil, &desc)
 					desc += "\n"
 					file.WriteString(desc)
