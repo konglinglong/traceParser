@@ -11,7 +11,6 @@ import "path/filepath"
 import "fmt"
 import "os"
 
-//trace header
 //type TraceItem struct {
 //	magicNum  uint32
 //	sec       uint32
@@ -52,6 +51,7 @@ var gFileDir string = ""
 
 var gXlsFile map[string]*os.File
 
+//创建文件夹
 func createDir(fileName string) string {
 
 	dir, err := filepath.Abs(filepath.Dir(os.Args[0]))
@@ -81,6 +81,7 @@ func createDir(fileName string) string {
 	return dir
 }
 
+//创建XLS文件
 func createXlsFile(structId string) string {
 
 	xlsFileName, err := gDescTable.StructId2XlsFileNameTable[structId]
@@ -101,6 +102,7 @@ func createXlsFile(structId string) string {
 	return fullPathName
 }
 
+//解析跟踪结构体描述
 func parseStructDesc(structName *string, fatherStructName *string, desc *string) {
 	structDesc, err := gDescTable.StructDescribeTable[*structName]
 	if !err {
@@ -146,6 +148,7 @@ func parseStructDesc(structName *string, fatherStructName *string, desc *string)
 	}
 }
 
+//解析跟踪数据
 func parseStructData(structName *string, structData []byte, desc *string) {
 	structDesc, err := gDescTable.StructDescribeTable[*structName]
 	if !err {
@@ -216,6 +219,26 @@ func parseStructData(structName *string, structData []byte, desc *string) {
 	}
 }
 
+//检查数据头部的traceSize是否与结构体描述表里面的定义一致
+func checkTrcDataHdrSize(hdrSize uint16, structName string) int {
+	structDesc, err := gDescTable.StructDescribeTable[structName]
+	if !err {
+		fmt.Println("can not find struct : ", structName)
+		return -1
+	}
+	structSize, err1 := structDesc.StructSize.Int64()
+	if err1 != nil {
+		fmt.Println("StructSize.Int64() : ", err1)
+		return -1
+	}
+	if hdrSize-TRACE_HDR_SIZE != uint16(structSize) {
+		fmt.Printf("ERROR : struct(%s) trcDataHdrSize[%d] != trcDescSize[%d], check describe table version!\n", structName, hdrSize-TRACE_HDR_SIZE, structSize)
+		return -1
+	}
+	return 0
+}
+
+//工作线程
 func worker(jobNum int, jobId int, dataChan <-chan []byte, syncChans []chan int) {
 	for {
 		item, ok := <-dataChan
@@ -231,26 +254,7 @@ func worker(jobNum int, jobId int, dataChan <-chan []byte, syncChans []chan int)
 		structId := fmt.Sprintf("%d", trcType)
 		structName := gDescTable.StructId2StructNameTable[structId]
 
-		structDesc, err := gDescTable.StructDescribeTable[structName]
-		if !err {
-			fmt.Println("can not find struct : ", structName)
-			if jobNum > 1 {
-				<-syncChans[jobId%jobNum]
-				syncChans[(jobId+1)%jobNum] <- 1
-			}
-			continue
-		}
-		structSize, err1 := structDesc.StructSize.Int64()
-		if err1 != nil {
-			fmt.Println("StructSize.Int64() : ", err1)
-			if jobNum > 1 {
-				<-syncChans[jobId%jobNum]
-				syncChans[(jobId+1)%jobNum] <- 1
-			}
-			continue
-		}
-		if trcSize-TRACE_HDR_SIZE != uint16(structSize) {
-			fmt.Printf("ERROR : struct(%s) trcDataHdrSize[%d] != trcDescSize[%d], check describe table version!\n", structName, trcSize-TRACE_HDR_SIZE, structSize)
+		if checkTrcDataHdrSize(trcSize, structName) != 0 {
 			if jobNum > 1 {
 				<-syncChans[jobId%jobNum]
 				syncChans[(jobId+1)%jobNum] <- 1
@@ -315,8 +319,8 @@ func main() {
 	}
 	//	fmt.Println(gDescTable)
 
-	var dataChs [CPU_PROCESS_NUM_MAX]chan []byte
-	var syncChs [CPU_PROCESS_NUM_MAX]chan int
+	var dataChs [CPU_PROCESS_NUM_MAX]chan []byte //数据发送信道
+	var syncChs [CPU_PROCESS_NUM_MAX]chan int    //同步信道,用于控制写入文件的顺序与读取的一致
 	dataChans := dataChs[:cpuNum]
 	syncChans := syncChs[:cpuNum]
 	for i := 0; i < cpuNum; i++ {
@@ -325,6 +329,7 @@ func main() {
 		go worker(cpuNum, i, dataChans[i], syncChans[:])
 	}
 
+	//用于首次触发
 	if cpuNum > 1 {
 		go func() {
 			syncChans[0] <- 1
@@ -341,6 +346,7 @@ func main() {
 		}
 
 		itemLen := len(item)
+		//检查MAGIC
 		if itemLen > TRACE_HDR_SIZE && item[itemLen-4] == 0xdd && item[itemLen-3] == 0xcc && item[itemLen-2] == 0xbb {
 
 			trcType := binary.BigEndian.Uint16(item[8:10])
@@ -353,9 +359,12 @@ func main() {
 			if int(trcSize) == itemLen {
 
 				file, err := gXlsFile[structId]
+				//如果还没有创建文件,先创建,并写入表头第一行
 				if !err {
 					createXlsFile(structId)
 					file, err = gXlsFile[structId]
+
+					//写入表头
 					desc := "time,msec,"
 					parseStructDesc(&structName, nil, &desc)
 					desc += "\n"
@@ -375,5 +384,6 @@ func main() {
 	}
 	fmt.Printf("trace data num :%12d\n", loop)
 
+	//耗时打印
 	fmt.Printf("elapsed time : %s\n", time.Since(start))
 }
