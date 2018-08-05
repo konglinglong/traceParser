@@ -47,7 +47,7 @@ type TraceDescribeTable struct {
 
 type WriteFileInfo struct {
 	file *os.File
-	data string
+	data []byte
 }
 
 const TRACE_HDR_SIZE = 16
@@ -256,7 +256,7 @@ func writeFileWorker(dataChan <-chan WriteFileInfo) {
 		if !ok {
 			break
 		}
-		wdata.file.WriteString(wdata.data)
+		wdata.file.Write(wdata.data)
 	}
 }
 
@@ -291,7 +291,7 @@ func parseDataWorker(jobNum int, jobId int, dataChan <-chan []byte, syncChans []
 
 		var writeInfo WriteFileInfo
 		writeInfo.file = gXlsFile[structId]
-		writeInfo.data = buffer.String()
+		writeInfo.data = buffer.Bytes()
 
 		if jobNum > 1 {
 			<-syncChans[jobId%jobNum]
@@ -367,7 +367,7 @@ func main() {
 	dataChans := dataChs[:cpuNum]
 	syncChans := syncChs[:cpuNum]
 	for i := 0; i < cpuNum; i++ {
-		dataChans[i] = make(chan []byte)
+		dataChans[i] = make(chan []byte, 4)
 		syncChans[i] = make(chan int)
 		go parseDataWorker(cpuNum, i, dataChans[i], syncChans[:], writeChan)
 	}
@@ -412,7 +412,7 @@ func main() {
 					buffer := bytes.NewBufferString("time,ms,")
 					parseStructDesc(&structName, nil, buffer)
 					buffer.WriteString("\n")
-					file.WriteString(buffer.String())
+					file.Write(buffer.Bytes())
 				}
 
 				dataChans[loop%cpuNum] <- item
