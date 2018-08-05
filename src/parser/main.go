@@ -3,6 +3,7 @@ package main
 import "bufio"
 import "io/ioutil"
 import "time"
+import "runtime"
 import "strings"
 import "encoding/binary"
 import "encoding/json"
@@ -21,29 +22,30 @@ import "os"
 //}
 
 type StructMemberDescribe struct {
-	Field_name string       `json:"field_name"`
-	Offset     json.Number  `json:"offset"`
-	Size       json.Number  `json:"size"`
-	Print_fmt  json.Number  `json:"print_fmt"`
-	Show_flag  json.Number  `json:"show_flag"`
-	Sub_struct *string      `json:"sub_struct"`
-	Array_len  *json.Number `json:"array_len"`
+	FieldName string       `json:"field_name"`
+	Offset    json.Number  `json:"offset"`
+	Size      json.Number  `json:"size"`
+	PrintFmt  json.Number  `json:"print_fmt"`
+	ShowFlag  json.Number  `json:"show_flag"`
+	SubStruct *string      `json:"sub_struct"`
+	ArrayLen  *json.Number `json:"array_len"`
 }
 
 type StructDescribe struct {
-	Struct_size json.Number            `json:"struct_size"`
-	Member_list []StructMemberDescribe `json:"member_list"`
+	StructSize json.Number            `json:"struct_size"`
+	MemberList []StructMemberDescribe `json:"member_list"`
 }
 
 type TraceDescribeTable struct {
-	Version                           string                    `json:"version"`
-	Build_time                        string                    `json:"build_time"`
-	Struct_id_and_struct_name_table   map[string]string         `json:"struct_id_and_struct_name_table"`
-	Struct_id_and_xls_file_name_table map[string]string         `json:"struct_id_and_xls_file_name_table"`
-	Struct_describe_table             map[string]StructDescribe `json:"struct_describe_table"`
+	Version                   string                    `json:"version"`
+	BuildTime                 string                    `json:"build_time"`
+	StructId2StructNameTable  map[string]string         `json:"struct_id_and_struct_name_table"`
+	StructId2XlsFileNameTable map[string]string         `json:"struct_id_and_xls_file_name_table"`
+	StructDescribeTable       map[string]StructDescribe `json:"struct_describe_table"`
 }
 
-const gTraceHdrSize = 16
+const TRACE_HDR_SIZE = 16
+const CPU_PROCESS_NUM_MAX = 64
 
 var gDescTable TraceDescribeTable
 var gFileDir string = ""
@@ -81,7 +83,7 @@ func createDir(fileName string) string {
 
 func createXlsFile(structId string) string {
 
-	xlsFileName, err := gDescTable.Struct_id_and_xls_file_name_table[structId]
+	xlsFileName, err := gDescTable.StructId2XlsFileNameTable[structId]
 	if !err {
 		fmt.Println("can not find struct : ", structId)
 		return ""
@@ -100,7 +102,7 @@ func createXlsFile(structId string) string {
 }
 
 func parseStructDesc(structName *string, fatherStructName *string, desc *string) {
-	structDesc, err := gDescTable.Struct_describe_table[*structName]
+	structDesc, err := gDescTable.StructDescribeTable[*structName]
 	if !err {
 		fmt.Println("can not find struct : ", *structName)
 		return
@@ -110,17 +112,17 @@ func parseStructDesc(structName *string, fatherStructName *string, desc *string)
 	if fatherStructName != nil {
 		fStructName = *fatherStructName + "."
 	}
-	for i := 0; i < len(structDesc.Member_list); i++ {
-		//		fmt.Println(structDesc.Member_list[i])
-		if structDesc.Member_list[i].Show_flag != "1" {
+	for i := 0; i < len(structDesc.MemberList); i++ {
+		//		fmt.Println(structDesc.MemberList[i])
+		if structDesc.MemberList[i].ShowFlag != "1" {
 			//			fmt.Println("continue")
 			continue
 		}
 
 		isSubscriptExist := false //是否存在下标
 		arrayLen := 1             //数组长度
-		if structDesc.Member_list[i].Array_len != nil {
-			alen, err := structDesc.Member_list[i].Array_len.Int64()
+		if structDesc.MemberList[i].ArrayLen != nil {
+			alen, err := structDesc.MemberList[i].ArrayLen.Int64()
 			if err != nil {
 				fmt.Println("Int64() : ", err)
 				return
@@ -134,9 +136,9 @@ func parseStructDesc(structName *string, fatherStructName *string, desc *string)
 			if isSubscriptExist {
 				subscript = fmt.Sprintf("[%d]", ii)
 			}
-			fieldName := structDesc.Member_list[i].Field_name + subscript
-			if structDesc.Member_list[i].Sub_struct != nil {
-				parseStructDesc(structDesc.Member_list[i].Sub_struct, &fieldName, desc)
+			fieldName := structDesc.MemberList[i].FieldName + subscript
+			if structDesc.MemberList[i].SubStruct != nil {
+				parseStructDesc(structDesc.MemberList[i].SubStruct, &fieldName, desc)
 			} else {
 				*desc = *desc + fStructName + fieldName + ","
 			}
@@ -145,46 +147,46 @@ func parseStructDesc(structName *string, fatherStructName *string, desc *string)
 }
 
 func parseStructData(structName *string, structData []byte, desc *string) {
-	structDesc, err := gDescTable.Struct_describe_table[*structName]
+	structDesc, err := gDescTable.StructDescribeTable[*structName]
 	if !err {
 		fmt.Println("can not find struct : ", *structName)
 		return
 	}
 	//	fmt.Println(structDesc)
-	for i := 0; i < len(structDesc.Member_list); i++ {
-		//		fmt.Println(structDesc.Member_list[i])
-		if structDesc.Member_list[i].Show_flag != "1" {
+	for i := 0; i < len(structDesc.MemberList); i++ {
+		//		fmt.Println(structDesc.MemberList[i])
+		if structDesc.MemberList[i].ShowFlag != "1" {
 			//			fmt.Println("continue")
 			continue
 		}
 
 		arrayLen := 1 //数组长度
-		if structDesc.Member_list[i].Array_len != nil {
-			alen, err := structDesc.Member_list[i].Array_len.Int64()
+		if structDesc.MemberList[i].ArrayLen != nil {
+			alen, err := structDesc.MemberList[i].ArrayLen.Int64()
 			if err != nil {
-				fmt.Println("Array_len.Int64() : ", err)
+				fmt.Println("ArrayLen.Int64() : ", err)
 				return
 			}
 			arrayLen = int(alen)
 		}
 
 		for ii := 0; ii < arrayLen; ii++ {
-			mSize, err := structDesc.Member_list[i].Size.Int64()
+			mSize, err := structDesc.MemberList[i].Size.Int64()
 			if err != nil {
 				fmt.Println("Size.Int64() : ", err)
 				return
 			}
-			mOffset, err := structDesc.Member_list[i].Offset.Int64()
+			mOffset, err := structDesc.MemberList[i].Offset.Int64()
 			if err != nil {
 				fmt.Println("Offset.Int64() : ", err)
 				return
 			}
 			valueBytes := structData[int(mOffset)+int(mSize)*ii:]
-			if structDesc.Member_list[i].Sub_struct != nil {
-				parseStructData(structDesc.Member_list[i].Sub_struct, valueBytes, desc)
+			if structDesc.MemberList[i].SubStruct != nil {
+				parseStructData(structDesc.MemberList[i].SubStruct, valueBytes, desc)
 			} else {
 				var value uint64 = 0
-				switch structDesc.Member_list[i].Size {
+				switch structDesc.MemberList[i].Size {
 				case "1":
 					value = uint64(valueBytes[0])
 				case "2":
@@ -194,11 +196,11 @@ func parseStructData(structName *string, structData []byte, desc *string) {
 				case "8":
 					value = uint64(binary.BigEndian.Uint64(valueBytes[:8]))
 				default:
-					fmt.Println("structDesc.Member_list[i].Size error!")
+					fmt.Println("structDesc.MemberList[i].Size error!")
 				}
 
 				valueStr := ""
-				switch structDesc.Member_list[i].Print_fmt {
+				switch structDesc.MemberList[i].PrintFmt {
 				case "0":
 					valueStr = fmt.Sprintf("%d", int64(value))
 				case "1":
@@ -206,7 +208,7 @@ func parseStructData(structName *string, structData []byte, desc *string) {
 				case "2":
 					valueStr = fmt.Sprintf("%#x", value)
 				default:
-					fmt.Println("structDesc.Member_list[i].Print_fmt error!")
+					fmt.Println("structDesc.MemberList[i].PrintFmt error!")
 				}
 				*desc = *desc + valueStr + ","
 			}
@@ -214,7 +216,77 @@ func parseStructData(structName *string, structData []byte, desc *string) {
 	}
 }
 
+func worker(jobNum int, jobId int, dataChan <-chan []byte, syncChans []chan int) {
+	for {
+		item, ok := <-dataChan
+		if !ok {
+			break
+		}
+
+		sec := binary.BigEndian.Uint32(item[:4])
+		usec := binary.BigEndian.Uint32(item[4:8])
+		trcType := binary.BigEndian.Uint16(item[8:10])
+		trcSize := binary.BigEndian.Uint16(item[10:12])
+
+		structId := fmt.Sprintf("%d", trcType)
+		structName := gDescTable.StructId2StructNameTable[structId]
+
+		structDesc, err := gDescTable.StructDescribeTable[structName]
+		if !err {
+			fmt.Println("can not find struct : ", structName)
+			if jobNum > 1 {
+				<-syncChans[jobId%jobNum]
+				syncChans[(jobId+1)%jobNum] <- 1
+			}
+			continue
+		}
+		structSize, err1 := structDesc.StructSize.Int64()
+		if err1 != nil {
+			fmt.Println("StructSize.Int64() : ", err1)
+			if jobNum > 1 {
+				<-syncChans[jobId%jobNum]
+				syncChans[(jobId+1)%jobNum] <- 1
+			}
+			continue
+		}
+		if trcSize-TRACE_HDR_SIZE != uint16(structSize) {
+			fmt.Printf("ERROR : struct(%s) trcDataHdrSize[%d] != trcDescSize[%d], check describe table version!\n", structName, trcSize-TRACE_HDR_SIZE, structSize)
+			if jobNum > 1 {
+				<-syncChans[jobId%jobNum]
+				syncChans[(jobId+1)%jobNum] <- 1
+			}
+			continue
+		}
+
+		desc := fmt.Sprintf("%s, %d, ", time.Unix(int64(sec), int64(usec)).Format("060102 15:04:05"), usec/1000)
+		parseStructData(&structName, item[12:], &desc)
+		desc += "\n"
+
+		file, _ := gXlsFile[structId]
+
+		if jobNum > 1 {
+			<-syncChans[jobId%jobNum]
+			file.WriteString(desc)
+			syncChans[(jobId+1)%jobNum] <- 1
+		} else {
+			file.WriteString(desc)
+		}
+	}
+}
+
 func main() {
+
+	start := time.Now()
+
+	cpuNum := runtime.NumCPU()
+	if cpuNum > CPU_PROCESS_NUM_MAX {
+		cpuNum = CPU_PROCESS_NUM_MAX
+	}
+	if cpuNum > 1 {
+		cpuNum = cpuNum - 1
+		runtime.GOMAXPROCS(cpuNum)
+	}
+
 	gFileDir = createDir("trc_data.dat")
 	if gFileDir == "" {
 		fmt.Println("createDir error!", gFileDir)
@@ -243,24 +315,42 @@ func main() {
 	}
 	//	fmt.Println(gDescTable)
 
+	var dataChs [CPU_PROCESS_NUM_MAX]chan []byte
+	var syncChs [CPU_PROCESS_NUM_MAX]chan int
+	dataChans := dataChs[:cpuNum]
+	syncChans := syncChs[:cpuNum]
+	for i := 0; i < cpuNum; i++ {
+		dataChans[i] = make(chan []byte)
+		syncChans[i] = make(chan int)
+		go worker(cpuNum, i, dataChans[i], syncChans[:])
+	}
+
+	if cpuNum > 1 {
+		go func() {
+			syncChans[0] <- 1
+		}()
+	}
+
+	loop := 0
 	dataReader := bufio.NewReader(dataFile)
 	for {
 		item, err := dataReader.ReadBytes(0xaa)
 		if err != nil {
-			fmt.Println(err)
+			//			fmt.Println(err)
 			break
 		}
 
 		itemLen := len(item)
-		if itemLen > gTraceHdrSize && item[itemLen-4] == 0xdd && item[itemLen-3] == 0xcc && item[itemLen-2] == 0xbb {
+		if itemLen > TRACE_HDR_SIZE && item[itemLen-4] == 0xdd && item[itemLen-3] == 0xcc && item[itemLen-2] == 0xbb {
 
+			trcType := binary.BigEndian.Uint16(item[8:10])
 			trcSize := binary.BigEndian.Uint16(item[10:12])
+			structId := fmt.Sprintf("%d", trcType)
+			structName, err := gDescTable.StructId2StructNameTable[structId]
+			if !err {
+				continue
+			}
 			if int(trcSize) == itemLen {
-				sec := binary.BigEndian.Uint32(item[:4])
-				usec := binary.BigEndian.Uint32(item[4:8])
-				trcType := binary.BigEndian.Uint16(item[8:10])
-				structId := fmt.Sprintf("%d", trcType)
-				structName := gDescTable.Struct_id_and_struct_name_table[structId]
 
 				file, err := gXlsFile[structId]
 				if !err {
@@ -272,11 +362,18 @@ func main() {
 					file.WriteString(desc)
 				}
 
-				desc := fmt.Sprintf("%s, %d, ", time.Unix(int64(sec), int64(usec)).Format("060102 15:04:05"), usec/1000)
-				parseStructData(&structName, item[12:], &desc)
-				desc += "\n"
-				file.WriteString(desc)
+				dataChans[loop%cpuNum] <- item
+				loop++
+				if loop%10000 == 0 {
+					fmt.Printf("trace data num :%12d\n", loop)
+				}
+
+			} else {
+				fmt.Printf("HDR : traceSize[%d] error! trcType[%d]\n", trcSize, trcType)
 			}
 		}
 	}
+	fmt.Printf("trace data num :%12d\n", loop)
+
+	fmt.Printf("elapsed time : %s\n", time.Since(start))
 }
