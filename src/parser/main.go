@@ -44,6 +44,11 @@ type TraceDescribeTable struct {
 	StructDescribeTable       map[string]StructDescribe `json:"struct_describe_table"`
 }
 
+type WriteFileInfo struct {
+	file *os.File
+	data *string
+}
+
 const TRACE_HDR_SIZE = 16
 const CPU_PROCESS_NUM_MAX = 64
 
@@ -240,8 +245,19 @@ func checkTrcDataHdrSize(hdrSize uint16, structName string) int {
 	return 0
 }
 
-//工作线程
-func worker(jobNum int, jobId int, dataChan <-chan []byte, syncChans []chan int) {
+//写文件线程
+func writeFileWorker(dataChan <-chan WriteFileInfo) {
+	for {
+		wdata, ok := <-dataChan
+		if !ok {
+			break
+		}
+		wdata.file.WriteString(*wdata.data)
+	}
+}
+
+//解析跟踪数据线程
+func parseDataWorker(jobNum int, jobId int, dataChan <-chan []byte, syncChans []chan int, writeCh chan<- WriteFileInfo) {
 	for {
 		item, ok := <-dataChan
 		if !ok {
@@ -264,19 +280,22 @@ func worker(jobNum int, jobId int, dataChan <-chan []byte, syncChans []chan int)
 			continue
 		}
 
-		desc := fmt.Sprintf("%s, %d, ", time.Unix(int64(sec), int64(usec)).Format("060102 15:04:05"), usec/1000)
+		outStr := new(string)
+		*outStr = fmt.Sprintf("%s, %d, ", time.Unix(int64(sec), int64(usec)).Format("060102 15:04:05"), usec/1000)
 		//减4是少了MAGIC
-		parseStructData(&structName, item[TRACE_HDR_SIZE-4:], &desc)
-		desc += "\n"
+		parseStructData(&structName, item[TRACE_HDR_SIZE-4:], outStr)
+		*outStr += "\n"
 
-		file, _ := gXlsFile[structId]
+		var writeInfo WriteFileInfo
+		writeInfo.file = gXlsFile[structId]
+		writeInfo.data = outStr
 
 		if jobNum > 1 {
 			<-syncChans[jobId%jobNum]
-			file.WriteString(desc)
+			writeCh <- writeInfo
 			syncChans[(jobId+1)%jobNum] <- 1
 		} else {
-			file.WriteString(desc)
+			writeCh <- writeInfo
 		}
 	}
 }
@@ -338,6 +357,8 @@ func main() {
 	}
 	//	fmt.Println(gDescTable)
 
+	writeChan := make(chan WriteFileInfo, 512)
+
 	var dataChs [CPU_PROCESS_NUM_MAX]chan []byte //数据发送信道
 	var syncChs [CPU_PROCESS_NUM_MAX]chan int    //同步信道,用于控制写入文件的顺序与读取的一致
 	dataChans := dataChs[:cpuNum]
@@ -345,8 +366,9 @@ func main() {
 	for i := 0; i < cpuNum; i++ {
 		dataChans[i] = make(chan []byte)
 		syncChans[i] = make(chan int)
-		go worker(cpuNum, i, dataChans[i], syncChans[:])
+		go parseDataWorker(cpuNum, i, dataChans[i], syncChans[:], writeChan)
 	}
+	go writeFileWorker(writeChan)
 
 	//用于首次触发
 	if cpuNum > 1 {
