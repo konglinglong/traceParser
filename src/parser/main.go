@@ -8,6 +8,7 @@ import "strings"
 import "encoding/binary"
 import "encoding/json"
 import "path/filepath"
+import "strconv"
 import "flag"
 import "bytes"
 import "fmt"
@@ -144,7 +145,7 @@ func parseStructDesc(structName *string, fatherStructName *string, buffer *bytes
 		subscript := "" //下标
 		for ii := 0; ii < arrayLen; ii++ {
 			if isSubscriptExist {
-				subscript = fmt.Sprintf("[%d]", ii)
+				subscript = "[" + strconv.FormatUint(uint64(ii), 10) + "]"
 			}
 			fieldName := structDesc.MemberList[i].FieldName + subscript
 			if structDesc.MemberList[i].SubStruct != nil {
@@ -212,18 +213,17 @@ func parseStructData(structName *string, structData []byte, buffer *bytes.Buffer
 					fmt.Println("structDesc.MemberList[i].Size error!")
 				}
 
-				valueStr := ""
 				switch structDesc.MemberList[i].PrintFmt {
 				case "0":
-					valueStr = fmt.Sprintf("%d", int64(value))
+					buffer.WriteString(strconv.FormatInt(int64(value), 10))
 				case "1":
-					valueStr = fmt.Sprintf("%d", value)
+					buffer.WriteString(strconv.FormatUint(uint64(value), 10))
 				case "2":
-					valueStr = fmt.Sprintf("%#x", value)
+					buffer.WriteString("0x")
+					buffer.WriteString(strconv.FormatUint(uint64(value), 16))
 				default:
 					fmt.Println("structDesc.MemberList[i].PrintFmt error!")
 				}
-				buffer.WriteString(valueStr)
 				buffer.WriteString(",")
 			}
 		}
@@ -272,8 +272,7 @@ func parseDataWorker(jobNum int, jobId int, dataChan <-chan []byte, syncChans []
 		usec := binary.BigEndian.Uint32(item[4:8])
 		trcType := binary.BigEndian.Uint16(item[8:10])
 		trcSize := binary.BigEndian.Uint16(item[10:12])
-
-		structId := fmt.Sprintf("%d", trcType)
+		structId := strconv.FormatUint(uint64(trcType), 10)
 		structName := gDescTable.StructId2StructNameTable[structId]
 
 		if checkTrcDataHdrSize(trcSize, structName) != 0 {
@@ -284,7 +283,10 @@ func parseDataWorker(jobNum int, jobId int, dataChan <-chan []byte, syncChans []
 			continue
 		}
 
-		buffer := bytes.NewBufferString(fmt.Sprintf("%s, %d, ", time.Unix(int64(sec), int64(usec)).Format("060102 15:04:05"), usec/1000))
+		buffer := bytes.NewBufferString(time.Unix(int64(sec), int64(usec)).Format("060102 15:04:05"))
+		buffer.WriteString(",")
+		buffer.WriteString(strconv.FormatUint(uint64(usec/1000), 10))
+		buffer.WriteString(",")
 		//减4是少了MAGIC
 		parseStructData(&structName, item[TRACE_HDR_SIZE-4:], buffer)
 		buffer.WriteString("\n")
@@ -395,7 +397,7 @@ func main() {
 
 			trcType := binary.BigEndian.Uint16(item[8:10])
 			trcSize := binary.BigEndian.Uint16(item[10:12])
-			structId := fmt.Sprintf("%d", trcType)
+			structId := strconv.FormatUint(uint64(trcType), 10)
 			structName, err := gDescTable.StructId2StructNameTable[structId]
 			if !err {
 				continue
