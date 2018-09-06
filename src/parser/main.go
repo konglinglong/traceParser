@@ -413,23 +413,31 @@ func main() {
 	}
 
 	loop := 0
+	var item []byte
 	dataReader := bufio.NewReader(dataFile)
 	for {
-		item, err := dataReader.ReadBytes(0xaa)
+		itemTmp, err := dataReader.ReadBytes(0xaa)
 		if err != nil {
 			//			fmt.Println(err)
 			break
 		}
 
+		if len(item) > 0 {
+			item = append(item, itemTmp...)
+		} else {
+			item = itemTmp[:]
+		}
+
 		itemLen := len(item)
 		//检查MAGIC
-		if itemLen > TRACE_HDR_SIZE && item[itemLen-4] == 0xdd && item[itemLen-3] == 0xcc && item[itemLen-2] == 0xbb {
+		if itemLen > TRACE_HDR_SIZE && binary.BigEndian.Uint32(item[itemLen-4:itemLen]) == 0xddccbbaa {
 
 			trcType := binary.BigEndian.Uint16(item[8:10])
 			trcSize := binary.BigEndian.Uint16(item[10:12])
 			structId := strconv.FormatUint(uint64(trcType), 10)
 			_, err := gDescTable.StructId2StructNameTable[structId]
 			if !err {
+				item = item[0:0]
 				continue
 			}
 			if int(trcSize) == itemLen {
@@ -441,6 +449,7 @@ func main() {
 			} else {
 				fmt.Printf("HDR : traceSize[%d] error! trcType[%d]\n", trcSize, trcType)
 			}
+			item = item[0:0]
 		}
 	}
 	fmt.Printf("trace data num :%12d\n", loop)
