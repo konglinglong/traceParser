@@ -23,7 +23,6 @@ type TraceItem struct {
 	usec      uint32
 	traceType uint16
 	traceSize uint16
-	data      []byte
 }
 
 type StructMemberDescribe struct {
@@ -65,10 +64,12 @@ type AsyncWriteCtrlBlock struct {
 	data       []byte
 }
 
-const TRACE_MAGIC uint32 = 0xddccbbaa
-const TRACE_HDR_SIZE = 16
-const CPU_PROCESS_NUM_MAX = 64
-const TRACE_CSV_FILE_SIZE_MAX = 10 //10M
+const (
+	TRACE_MAGIC             uint32 = 0xddccbbaa
+	TRACE_HDR_SIZE                 = 16
+	CPU_PROCESS_NUM_MAX            = 64
+	TRACE_CSV_FILE_SIZE_MAX        = 10 //10M
+)
 
 type TraceParser struct {
 	help        *bool
@@ -84,8 +85,8 @@ type TraceParser struct {
 	byteOrder binary.ByteOrder
 
 	jobNum  int
-	dataChs [CPU_PROCESS_NUM_MAX]chan TraceItem //数据发送信道
-	syncChs [CPU_PROCESS_NUM_MAX]chan int       //同步信道,用于控制写入文件的顺序与读取的一致
+	dataChs [CPU_PROCESS_NUM_MAX]chan []byte //数据发送信道
+	syncChs [CPU_PROCESS_NUM_MAX]chan int    //同步信道,用于控制写入文件的顺序与读取的一致
 }
 
 func NewParser() *TraceParser {
@@ -142,22 +143,20 @@ func (parser *TraceParser) Parse() {
 	}
 	defer dataFile.Close()
 
-	mmap, err3 := gommap.Map(dataFile.Fd(), gommap.PROT_READ,
+	data, err3 := gommap.Map(dataFile.Fd(), gommap.PROT_READ,
 		gommap.MAP_PRIVATE)
 	if err3 != nil {
 		fmt.Println(err3)
 		return
 	}
 
-	//mmap, err3 := ioutil.ReadFile(*parser.trcDataFile) // just pass the file name
+	//data, err3 := ioutil.ReadFile(*parser.trcDataFile) // just pass the file name
 	//if err3 != nil {
 	//	fmt.Print(err3)
 	//	return
 	//}
 
-	fmt.Println(len(mmap))
-
-	parser.JudgeByteOrder(mmap)
+	parser.JudgeByteOrder(data)
 
 	descData, err3 := ioutil.ReadFile(*parser.trcDescFile)
 	if err3 != nil {
@@ -174,7 +173,7 @@ func (parser *TraceParser) Parse() {
 	parser.csvFile = make(map[string]CsvFileCtrlBlock, 1024)
 	writeChan := make(chan AsyncWriteCtrlBlock, 512)
 	for i := 0; i < parser.jobNum; i++ {
-		parser.dataChs[i] = make(chan TraceItem, 8)
+		parser.dataChs[i] = make(chan []byte, 8)
 		parser.syncChs[i] = make(chan int)
 		go parser.ParseDataWorker(parser.jobNum, i, parser.dataChs[i], parser.syncChs[:parser.jobNum], writeChan)
 	}
@@ -188,36 +187,30 @@ func (parser *TraceParser) Parse() {
 	}
 
 	loop := 0
-	dataSize := len(mmap)
+	dataSize := len(data)
 	readOffset := 0
 	hdrErrCount := 0
 	for {
-		var item TraceItem
 		if readOffset+TRACE_HDR_SIZE > dataSize {
 			break
 		}
-		item.magicNum = parser.byteOrder.Uint32(mmap[readOffset : readOffset+4])
-		if item.magicNum == TRACE_MAGIC {
-			item.traceSize = parser.byteOrder.Uint16(mmap[readOffset+14 : readOffset+16])
-			if readOffset+int(item.traceSize) > dataSize {
+		if parser.byteOrder.Uint32(data[readOffset:readOffset+4]) == TRACE_MAGIC {
+			traceSize := int(parser.byteOrder.Uint16(data[readOffset+14 : readOffset+16]))
+			if readOffset+traceSize > dataSize {
 				readOffset += 4
 				hdrErrCount++
 				continue
 			}
-			if readOffset+int(item.traceSize) <= dataSize-4 {
-				if parser.byteOrder.Uint32(mmap[readOffset+int(item.traceSize):readOffset+int(item.traceSize)+4]) != TRACE_MAGIC {
+			if readOffset+traceSize <= dataSize-4 {
+				if parser.byteOrder.Uint32(data[readOffset+traceSize:readOffset+traceSize+4]) != TRACE_MAGIC {
 					readOffset += 4
 					hdrErrCount++
 					continue
 				}
 			}
-			item.sec = parser.byteOrder.Uint32(mmap[readOffset+4 : readOffset+8])
-			item.usec = parser.byteOrder.Uint32(mmap[readOffset+8 : readOffset+12])
-			item.traceType = (uint16(mmap[readOffset+12]) << 8) | uint16(mmap[readOffset+13])
-			item.data = mmap[readOffset+TRACE_HDR_SIZE : readOffset+int(item.traceSize)]
-			readOffset += int(item.traceSize)
 
-			parser.dataChs[loop%parser.jobNum] <- item
+			parser.dataChs[loop%parser.jobNum] <- data[readOffset : readOffset+traceSize]
+			readOffset += traceSize
 
 			loop++
 			if loop%10000 == 0 {
@@ -228,8 +221,7 @@ func (parser *TraceParser) Parse() {
 			hdrErrCount++
 		}
 	}
-	fmt.Printf("hdrErrCount :%12d\n", hdrErrCount)
-	fmt.Printf("trace data num :%12d\n", loop)
+	fmt.Printf("trace data num :%12d, hdrErrCount :%d\n", loop, hdrErrCount)
 }
 
 //创建文件夹
@@ -307,12 +299,19 @@ func (parser *TraceParser) JudgeByteOrder(data []byte) {
 }
 
 //解析跟踪数据线程
-func (parser *TraceParser) ParseDataWorker(jobNum int, jobId int, dataChan <-chan TraceItem, syncChans []chan int, writeCh chan<- AsyncWriteCtrlBlock) {
+func (parser *TraceParser) ParseDataWorker(jobNum int, jobId int, dataChan <-chan []byte, syncChans []chan int, writeCh chan<- AsyncWriteCtrlBlock) {
 	for {
-		item, ok := <-dataChan
+		data, ok := <-dataChan
 		if !ok {
 			break
 		}
+
+		var item TraceItem
+		item.magicNum = parser.byteOrder.Uint32(data[0:4])
+		item.sec = parser.byteOrder.Uint32(data[4:8])
+		item.usec = parser.byteOrder.Uint32(data[8:12])
+		item.traceType = (uint16(data[12]) << 8) | uint16(data[13])
+		item.traceSize = parser.byteOrder.Uint16(data[14:16])
 
 		structId, structName, err := parser.CheckTrcHeader(&item)
 		if err != nil {
@@ -328,7 +327,7 @@ func (parser *TraceParser) ParseDataWorker(jobNum int, jobId int, dataChan <-cha
 		buffer.WriteString(",")
 		buffer.WriteString(strconv.FormatUint(uint64(item.usec/1000), 10))
 		buffer.WriteString(",")
-		parser.ParseStructData(&structName, item.data, buffer)
+		parser.ParseStructData(&structName, data[TRACE_HDR_SIZE:], buffer)
 		buffer.WriteString("\n")
 
 		asyncWrite := AsyncWriteCtrlBlock{structId, structName, buffer.Bytes()}
@@ -526,8 +525,6 @@ func (parser *TraceParser) ParseStructDesc(structName *string, fatherStructName 
 
 func main() {
 	start := time.Now()
-
-	//Parse()
 
 	parser := NewParser()
 	err := parser.ParseFlag()
