@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
@@ -14,6 +15,7 @@ import (
 	"runtime/pprof"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -52,13 +54,20 @@ type TraceDescribeTable struct {
 	StructDescribeTable       map[string]StructDescribe `json:"struct_describe_table"`
 }
 
-type CsvFileCtrlBlock struct {
+type CsvFileInfo struct {
 	file *os.File
+	wter *bufio.Writer
 	size int
 	num  int
 }
 
-type AsyncWriteCtrlBlock struct {
+type TraceRawData struct {
+	stopInd bool
+	data    []byte
+}
+
+type TraceJsonData struct {
+	stopInd    bool
 	structId   string
 	structName string
 	data       []byte
@@ -80,13 +89,16 @@ type TraceParser struct {
 
 	fileDir   string
 	descTable TraceDescribeTable
-	csvFile   map[string]CsvFileCtrlBlock
+	csvFile   map[string]CsvFileInfo
 
+	readCount       int
+	readHdrErrCount int
+
+	jobNum    int
+	dataChs   [CPU_PROCESS_NUM_MAX]chan TraceRawData
+	writeChs  [CPU_PROCESS_NUM_MAX]chan TraceJsonData
+	wg        sync.WaitGroup
 	byteOrder binary.ByteOrder
-
-	jobNum  int
-	dataChs [CPU_PROCESS_NUM_MAX]chan []byte //数据发送信道
-	syncChs [CPU_PROCESS_NUM_MAX]chan int    //同步信道,用于控制写入文件的顺序与读取的一致
 }
 
 func NewParser() *TraceParser {
@@ -130,6 +142,8 @@ func (parser *TraceParser) Parse() {
 		parser.jobNum = CPU_PROCESS_NUM_MAX
 	}
 
+	fmt.Println("jobNum : ", parser.jobNum)
+
 	err1 := parser.CreateDir(*parser.trcDataFile)
 	if err1 != nil {
 		fmt.Println("CreateDir : ", err1)
@@ -143,18 +157,17 @@ func (parser *TraceParser) Parse() {
 	}
 	defer dataFile.Close()
 
-	data, err3 := gommap.Map(dataFile.Fd(), gommap.PROT_READ,
-		gommap.MAP_PRIVATE)
+	data, err3 := gommap.Map(dataFile.Fd(), gommap.PROT_READ, gommap.MAP_PRIVATE)
 	if err3 != nil {
 		fmt.Println(err3)
 		return
 	}
 
-	//data, err3 := ioutil.ReadFile(*parser.trcDataFile) // just pass the file name
-	//if err3 != nil {
-	//	fmt.Print(err3)
-	//	return
-	//}
+	// data, err3 := ioutil.ReadFile(*parser.trcDataFile)
+	// if err3 != nil {
+	// 	fmt.Print(err3)
+	// 	return
+	// }
 
 	parser.JudgeByteOrder(data)
 
@@ -170,26 +183,22 @@ func (parser *TraceParser) Parse() {
 		return
 	}
 
-	parser.csvFile = make(map[string]CsvFileCtrlBlock, 1024)
-	writeChan := make(chan AsyncWriteCtrlBlock, 512)
-	for i := 0; i < parser.jobNum; i++ {
-		parser.dataChs[i] = make(chan []byte, 8)
-		parser.syncChs[i] = make(chan int)
-		go parser.ParseDataWorker(parser.jobNum, i, parser.dataChs[i], parser.syncChs[:parser.jobNum], writeChan)
-	}
-	go parser.WriteFileWorker(writeChan)
+	parser.csvFile = make(map[string]CsvFileInfo, 1024)
 
-	//用于首次触发
-	if parser.jobNum > 1 {
-		go func() {
-			parser.syncChs[0] <- 1
-		}()
+	for i := 0; i < parser.jobNum; i++ {
+		parser.dataChs[i] = make(chan TraceRawData, 4096)
+		parser.writeChs[i] = make(chan TraceJsonData, 4096)
+		parser.wg.Add(1)
+		go parser.ParseDataWorker(i)
 	}
+	parser.wg.Add(1)
+	go parser.WriteFileWorker()
 
 	loop := 0
 	dataSize := len(data)
 	readOffset := 0
 	hdrErrCount := 0
+	var rawData TraceRawData
 	for {
 		if readOffset+TRACE_HDR_SIZE > dataSize {
 			break
@@ -208,20 +217,32 @@ func (parser *TraceParser) Parse() {
 					continue
 				}
 			}
-
-			parser.dataChs[loop%parser.jobNum] <- data[readOffset : readOffset+traceSize]
+			rawData.stopInd = false
+			rawData.data = data[readOffset : readOffset+traceSize]
+			parser.dataChs[loop%parser.jobNum] <- rawData
 			readOffset += traceSize
 
 			loop++
 			if loop%10000 == 0 {
-				fmt.Printf("trace data num :%12d\n", loop)
+				fmt.Printf("readCount :%12d\n", loop)
 			}
 		} else {
 			readOffset++
 			hdrErrCount++
 		}
 	}
-	fmt.Printf("trace data num :%12d, hdrErrCount :%d\n", loop, hdrErrCount)
+
+	rawData.stopInd = true
+	rawData.data = nil
+	for i := 0; i < parser.jobNum; i++ {
+		parser.dataChs[(i+loop)%parser.jobNum] <- rawData
+	}
+
+	parser.readCount = loop
+	parser.readHdrErrCount = hdrErrCount
+
+	fmt.Printf("readCount :%12d\n", loop)
+	// fmt.Printf("readCount :%12d, headerErrorCount :%d\n", loop, hdrErrCount)
 }
 
 //创建文件夹
@@ -299,78 +320,92 @@ func (parser *TraceParser) JudgeByteOrder(data []byte) {
 }
 
 //解析跟踪数据线程
-func (parser *TraceParser) ParseDataWorker(jobNum int, jobId int, dataChan <-chan []byte, syncChans []chan int, writeCh chan<- AsyncWriteCtrlBlock) {
+func (parser *TraceParser) ParseDataWorker(jobId int) {
+
+	var item TraceItem
+	var jsonData TraceJsonData
+
 	for {
-		data, ok := <-dataChan
-		if !ok {
+		rawData, ok := <-parser.dataChs[jobId]
+		if !ok || rawData.stopInd {
+			jsonData = TraceJsonData{true, "", "", nil}
+			parser.writeChs[jobId] <- jsonData
 			break
 		}
 
-		var item TraceItem
-		item.magicNum = parser.byteOrder.Uint32(data[0:4])
-		item.sec = parser.byteOrder.Uint32(data[4:8])
-		item.usec = parser.byteOrder.Uint32(data[8:12])
-		item.traceType = (uint16(data[12]) << 8) | uint16(data[13])
-		item.traceSize = parser.byteOrder.Uint16(data[14:16])
+		item.magicNum = parser.byteOrder.Uint32(rawData.data[0:4])
+		item.sec = parser.byteOrder.Uint32(rawData.data[4:8])
+		item.usec = parser.byteOrder.Uint32(rawData.data[8:12])
+		item.traceType = (uint16(rawData.data[12]) << 8) | uint16(rawData.data[13])
+		item.traceSize = parser.byteOrder.Uint16(rawData.data[14:16])
 
 		structId, structName, err := parser.CheckTrcHeader(&item)
-		if err != nil {
-			fmt.Println("CheckTrcHeader : ", err)
-			if jobNum > 1 {
-				<-syncChans[jobId%jobNum]
-				syncChans[(jobId+1)%jobNum] <- 1
-			}
-			continue
-		}
+		if err == nil {
+			buffer := bytes.NewBufferString(time.Unix(int64(item.sec), int64(item.usec)).Format("060102 15:04:05"))
+			buffer.WriteString(",")
+			buffer.WriteString(strconv.FormatUint(uint64(item.usec/1000), 10))
+			buffer.WriteString(",")
+			parser.ParseStructData(&structName, rawData.data[TRACE_HDR_SIZE:], buffer)
+			buffer.WriteString("\n")
 
-		buffer := bytes.NewBufferString(time.Unix(int64(item.sec), int64(item.usec)).Format("060102 15:04:05"))
-		buffer.WriteString(",")
-		buffer.WriteString(strconv.FormatUint(uint64(item.usec/1000), 10))
-		buffer.WriteString(",")
-		parser.ParseStructData(&structName, data[TRACE_HDR_SIZE:], buffer)
-		buffer.WriteString("\n")
-
-		asyncWrite := AsyncWriteCtrlBlock{structId, structName, buffer.Bytes()}
-
-		if jobNum > 1 {
-			<-syncChans[jobId%jobNum]
-			writeCh <- asyncWrite
-			syncChans[(jobId+1)%jobNum] <- 1
+			jsonData = TraceJsonData{false, structId, structName, buffer.Bytes()}
 		} else {
-			writeCh <- asyncWrite
+			fmt.Println("CheckTrcHeader : ", err)
+			jsonData = TraceJsonData{false, "", "", nil}
 		}
+
+		parser.writeChs[jobId] <- jsonData
 	}
+	parser.wg.Done()
 }
 
 //写文件线程
-func (parser *TraceParser) WriteFileWorker(dataChan <-chan AsyncWriteCtrlBlock) {
+func (parser *TraceParser) WriteFileWorker() {
+	loop := 0
 	for {
-		asyncData, ok := <-dataChan
-		if !ok {
+		jsonData, ok := <-parser.writeChs[loop%parser.jobNum]
+		if !ok || jsonData.stopInd {
 			break
 		}
+		if jsonData.data == nil {
+			continue
+		}
+		loop++
 
-		csvFileCb, err := parser.csvFile[asyncData.structId]
-		if !err || csvFileCb.file == nil {
-			parser.CreateCsvFile(asyncData.structId)
+		csvFileInfo, err := parser.csvFile[jsonData.structId]
+		if !err || csvFileInfo.file == nil {
+			parser.CreateCsvFile(jsonData.structId)
 
-			csvFileCb, _ = parser.csvFile[asyncData.structId]
+			csvFileInfo, _ = parser.csvFile[jsonData.structId]
 			//写入表头
 			buffer := bytes.NewBufferString("time,ms,")
-			parser.ParseStructDesc(&asyncData.structName, nil, buffer)
+			parser.ParseStructDesc(&jsonData.structName, nil, buffer)
 			buffer.WriteString("\n")
-			csvFileCb.file.Write(buffer.Bytes())
+			csvFileInfo.wter.Write(buffer.Bytes())
 		}
 
-		csvFileCb.file.Write(asyncData.data)
-		csvFileCb.size += len(asyncData.data)
-		if csvFileCb.size >= *parser.xlsFileSize {
-			csvFileCb.file.Close()
-			csvFileCb.file = nil
-			csvFileCb.size = 0
+		csvFileInfo.wter.Write(jsonData.data)
+		csvFileInfo.size += len(jsonData.data)
+		if csvFileInfo.size >= *parser.xlsFileSize {
+			csvFileInfo.wter.Flush()
+			csvFileInfo.wter = nil
+			csvFileInfo.file.Close()
+			csvFileInfo.file = nil
+			csvFileInfo.size = 0
 		}
-		parser.csvFile[asyncData.structId] = csvFileCb
+		parser.csvFile[jsonData.structId] = csvFileInfo
 	}
+
+	for _, value := range parser.csvFile {
+		value.wter.Flush()
+		value.wter = nil
+		value.file.Close()
+		value.file = nil
+	}
+
+	fmt.Printf("\nreadCount : %d, writeCount : %d, headerErrorCount : %d\n\n", parser.readCount, loop, parser.readHdrErrCount)
+
+	parser.wg.Done()
 }
 
 //检查数据头部是否与结构体描述表里面的定义一致
@@ -459,32 +494,31 @@ func (parser *TraceParser) ParseStructData(structName *string, structData []byte
 	}
 }
 
-//创建XLS文件
-func (parser *TraceParser) CreateCsvFile(structId string) string {
+//创建CSV文件
+func (parser *TraceParser) CreateCsvFile(structId string) error {
 
 	xlsFileName, err := parser.descTable.StructId2XlsFileNameTable[structId]
 	if !err {
-		fmt.Println("can not find structId : ", structId)
-		return ""
+		return fmt.Errorf("structId(%q) not found", structId)
 	}
 
-	csvFileCb := CsvFileCtrlBlock{nil, 0, 0}
-	csvFileCb, _ = parser.csvFile[structId]
+	csvFileInfo := CsvFileInfo{nil, nil, 0, 0}
+	csvFileInfo, _ = parser.csvFile[structId]
 
-	fullPathName := fmt.Sprintf("%s/%s(%d).csv", parser.fileDir, xlsFileName, csvFileCb.num)
+	fullPathName := fmt.Sprintf("%s/%s(%d).csv", parser.fileDir, xlsFileName, csvFileInfo.num)
 
 	file, err1 := os.OpenFile(fullPathName, os.O_RDWR|os.O_CREATE, 0766)
 	if err1 != nil {
-		fmt.Println(err1)
-		return ""
+		return err1
 	}
 
-	csvFileCb.file = file
-	csvFileCb.num++
+	csvFileInfo.file = file
+	csvFileInfo.wter = bufio.NewWriter(file)
+	csvFileInfo.num++
 
-	parser.csvFile[structId] = csvFileCb
+	parser.csvFile[structId] = csvFileInfo
 
-	return fullPathName
+	return nil
 }
 
 //解析跟踪结构体描述
@@ -523,6 +557,10 @@ func (parser *TraceParser) ParseStructDesc(structName *string, fatherStructName 
 	}
 }
 
+func (parser *TraceParser) WaitRoutines() {
+	parser.wg.Wait()
+}
+
 func main() {
 	start := time.Now()
 
@@ -545,6 +583,7 @@ func main() {
 	}
 
 	parser.Parse()
+	parser.WaitRoutines()
 
 	//耗时打印
 	fmt.Printf("elapsed time : %s\n", time.Since(start))
